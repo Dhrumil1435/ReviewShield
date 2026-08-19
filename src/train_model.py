@@ -1,9 +1,9 @@
 """
 train_model.py
 Trains, evaluates, and serializes machine learning models for ReviewShield deceptive review detection.
-Incorporates Stylometric + VADER + RoBERTa Transformer features.
-Models evaluated: Logistic Regression, Random Forest, HistGradientBoosting.
-Saves the best performing pipeline to models/best_model_pipeline.joblib.
+Hybrid Architecture: Combines 9 Stylometric/VADER/RoBERTa features with TF-IDF Word N-Grams.
+Models evaluated: Logistic Regression, Random Forest, SGD Classifier.
+Saves the best performing hybrid pipeline to models/best_model_pipeline.joblib.
 """
 
 import sys
@@ -20,9 +20,11 @@ import matplotlib.pyplot as plt
 
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
-from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier, HistGradientBoostingClassifier
+from sklearn.linear_model import LogisticRegression, SGDClassifier
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
     accuracy_score,
     precision_score,
@@ -33,7 +35,7 @@ from sklearn.metrics import (
 )
 from src.config import get_db_engine, MODELS_DIR
 
-FEATURE_COLS = [
+NUMERICAL_COLS = [
     "punctuation_freq",
     "vocab_diversity",
     "readability_score",
@@ -49,7 +51,7 @@ FEATURE_COLS = [
 def load_dataset():
     engine = get_db_engine()
     query = """
-        SELECT f.review_id, r.label, f.punctuation_freq, f.vocab_diversity, 
+        SELECT f.review_id, r.review_text, r.label, f.punctuation_freq, f.vocab_diversity, 
                f.readability_score, f.avg_sentence_length, f.sentiment_score, f.rating_sentiment_gap,
                COALESCE(f.roberta_sentiment, 0.0) as roberta_sentiment,
                COALESCE(f.roberta_rating_sentiment_gap, 0.0) as roberta_rating_sentiment_gap,
@@ -58,6 +60,9 @@ def load_dataset():
         JOIN raw_reviews r ON f.review_id = r.review_id
     """
     df = pd.read_sql(query, engine)
+    
+    # Ensure string type for text
+    df["review_text"] = df["review_text"].fillna("").astype(str)
     
     # Encode Target: CG (Computer Generated / Deceptive) = 1, OR (Original / Genuine) = 0
     df["target"] = df["label"].apply(lambda x: 1 if str(x).strip().upper() in ["CG", "1", "FAKE"] else 0)
@@ -69,7 +74,9 @@ def load_dataset():
 
 def train_and_evaluate():
     df = load_dataset()
-    X = df[FEATURE_COLS]
+    
+    feature_cols = ["review_text"] + NUMERICAL_COLS
+    X = df[feature_cols]
     y = df["target"]
 
     # Stratified Train-Test Split (80% train, 20% test)
@@ -77,18 +84,35 @@ def train_and_evaluate():
         X, y, test_size=0.20, random_state=42, stratify=y
     )
 
+    # Hybrid Preprocessor: Scaled Numerical + TF-IDF Text N-Grams
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", StandardScaler(), NUMERICAL_COLS),
+            (
+                "text",
+                TfidfVectorizer(
+                    ngram_range=(1, 2),
+                    max_features=2000,
+                    sublinear_tf=True,
+                    stop_words="english",
+                ),
+                "review_text",
+            ),
+        ]
+    )
+
     models = {
         "LogisticRegression": Pipeline([
-            ("scaler", StandardScaler()),
-            ("classifier", LogisticRegression(random_state=42, max_iter=500)),
+            ("preprocessor", preprocessor),
+            ("classifier", LogisticRegression(random_state=42, max_iter=1000, C=2.0)),
+        ]),
+        "SGDClassifier_LogLoss": Pipeline([
+            ("preprocessor", preprocessor),
+            ("classifier", SGDClassifier(loss="log_loss", random_state=42, max_iter=1000)),
         ]),
         "RandomForest": Pipeline([
-            ("scaler", StandardScaler()),
-            ("classifier", RandomForestClassifier(n_estimators=50, max_depth=12, random_state=42, n_jobs=2)),
-        ]),
-        "HistGradientBoosting": Pipeline([
-            ("scaler", StandardScaler()),
-            ("classifier", HistGradientBoostingClassifier(max_iter=100, random_state=42)),
+            ("preprocessor", preprocessor),
+            ("classifier", RandomForestClassifier(n_estimators=100, max_depth=18, random_state=42, n_jobs=2)),
         ]),
     }
 
@@ -98,7 +122,7 @@ def train_and_evaluate():
     best_pipeline = None
 
     print("\n" + "=" * 50)
-    print("STARTING MODEL BENCHMARKING (WITH ROBERTA FEATURES)")
+    print("STARTING HYBRID MODEL BENCHMARKING (STYLOMETRICS + TF-IDF)")
     print("=" * 50)
 
     for name, pipeline in models.items():
@@ -125,7 +149,7 @@ def train_and_evaluate():
         }
 
         print(f"--> {name} Results:")
-        print(f"    Accuracy : {acc:.4f}")
+        print(f"    Accuracy : {acc:.4f} ({acc*100:.2f}%)")
         print(f"    Precision: {prec:.4f}")
         print(f"    Recall   : {rec:.4f}")
         print(f"    F1-Score : {f1:.4f}")
@@ -137,34 +161,49 @@ def train_and_evaluate():
             best_pipeline = pipeline
 
     print("\n" + "=" * 50)
-    print(f"BEST MODEL: {best_model_name} (ROC-AUC: {best_roc_auc:.4f})")
+    print(f"BEST MODEL: {best_model_name} (ROC-AUC: {best_roc_auc:.4f}, Accuracy: {results[best_model_name]['accuracy']*100:.2f}%)")
     print("=" * 50)
 
+    # Save Best Model Pipeline
     pipeline_path = MODELS_DIR / "best_model_pipeline.joblib"
     joblib.dump({
         "pipeline": best_pipeline,
-        "feature_names": FEATURE_COLS,
+        "numerical_cols": NUMERICAL_COLS,
+        "feature_names": feature_cols,
         "model_name": best_model_name,
         "metrics": results[best_model_name],
     }, pipeline_path)
-    print(f"Saved best model pipeline to {pipeline_path}")
+    print(f"Saved best hybrid model pipeline to {pipeline_path}")
 
+    # Save Metrics Report JSON
     metrics_path = MODELS_DIR / "metrics_report.json"
     with open(metrics_path, "w") as f:
         json.dump(results, f, indent=4)
     print(f"Saved model metrics report to {metrics_path}")
 
-    if "RandomForest" in models:
-        rf_model = models["RandomForest"].named_steps["classifier"]
-        importances = rf_model.feature_importances_
-        plt.figure(figsize=(9, 6))
-        plt.barh(FEATURE_COLS, importances, color="#4F46E5")
-        plt.title("Random Forest Feature Importances (Stylometric + VADER + RoBERTa)")
-        plt.xlabel("Importance Score")
+    # Feature Importance / Coefficients Visualization
+    if best_model_name in ["LogisticRegression", "SGDClassifier_LogLoss"]:
+        clf = best_pipeline.named_steps["classifier"]
+        prep = best_pipeline.named_steps["preprocessor"]
+        
+        # Get feature names from preprocessor
+        tf_vectorizer = prep.named_transformers_["text"]
+        tfidf_feature_names = list(tf_vectorizer.get_feature_names_out())
+        all_feature_names = NUMERICAL_COLS + tfidf_feature_names
+        
+        coefs = clf.coef_[0]
+        top_positive_idx = np.argsort(coefs)[-15:]
+        top_negative_idx = np.argsort(coefs)[:15]
+        top_indices = np.hstack([top_negative_idx, top_positive_idx])
+        
+        plt.figure(figsize=(10, 7))
+        plt.barh([all_feature_names[i] for i in top_indices], coefs[top_indices], color=["#EF4444" if coefs[i] > 0 else "#10B981" for i in top_indices])
+        plt.title("Top Deceptive (Red) vs Authentic (Green) Hybrid Predictors")
+        plt.xlabel("Coefficient Value")
         plt.tight_layout()
         plt.savefig(MODELS_DIR / "feature_importance.png")
         plt.close()
-        print(f"Saved feature importance plot to {MODELS_DIR / 'feature_importance.png'}")
+        print(f"Saved hybrid feature importance plot to {MODELS_DIR / 'feature_importance.png'}")
 
 
 if __name__ == "__main__":

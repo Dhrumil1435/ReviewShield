@@ -2,7 +2,8 @@
 app.py
 Streamlit Web Application for ReviewShield.
 Interactive Deceptive Review Detection System with real-time inference,
-VADER + RoBERTa dual-sentiment comparison, Batch CSV dataset scanner, and model analytics.
+VADER + RoBERTa dual-sentiment comparison, Explainable AI (XAI) Word Attribution,
+Batch CSV dataset scanner, and model analytics.
 """
 
 import sys
@@ -20,7 +21,7 @@ from src.inference import ReviewAnalyzer
 
 # Page Configuration
 st.set_page_config(
-    page_title="ReviewShield - Deceptive Review Detection (VADER + RoBERTa)",
+    page_title="ReviewShield - Deceptive Review Detection (XAI + RoBERTa)",
     page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -58,6 +59,15 @@ st.markdown("""
         font-weight: 600;
         font-size: 1rem;
     }
+    .xai-box {
+        background-color: #0F172A;
+        border: 1px solid #334155;
+        border-radius: 10px;
+        padding: 16px;
+        font-size: 1.05rem;
+        line-height: 1.8;
+        color: #E2E8F0;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -70,7 +80,7 @@ def get_analyzer():
 def main():
     st.markdown('<div class="main-header">🛡️ ReviewShield AI Engine</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="sub-header">Deceptive Review Detection powered by VADER + RoBERTa Dual-Sentiment Analysis</div>',
+        '<div class="sub-header">Deceptive Review Detection with Explainable AI (XAI) & VADER + RoBERTa Dual-Sentiment Analysis</div>',
         unsafe_allow_html=True,
     )
 
@@ -94,8 +104,8 @@ def main():
 
     # PAGE 1: Single Review Scanner
     if page == "🔍 Single Review Scanner":
-        st.subheader("Analyze Review Authenticity & Sentiment Dissonance")
-        st.write("Input a product review and star rating to calculate deceptive probability using VADER + RoBERTa Transformer scores.")
+        st.subheader("Analyze Review Authenticity & Word-Level Attributions")
+        st.write("Input a product review and star rating to calculate deceptive probability using hybrid TF-IDF + VADER + RoBERTa scores.")
 
         col1, col2 = st.columns([3, 2])
 
@@ -144,6 +154,34 @@ def main():
 
         st.divider()
 
+        # EXPLAINABLE AI (XAI) WORD ATTRIBUTION SECTION
+        if analyze_btn or review_text:
+            st.subheader("🧠 Explainable AI (XAI) — Word-Level Attribution Scanner")
+            st.write("Visual breakdown showing exact word contributions to the deception score based on model weights.")
+
+            # Legend Bar
+            st.markdown(
+                """
+                <div style='margin-bottom: 12px; font-size: 0.95rem;'>
+                    <b>Legend:</b> 
+                    <span style='background-color:#7F1D1D; color:#FCA5A5; padding:2px 8px; border-radius:4px; margin-right:8px;'>🔴 Suspicious Deceptive Keyword</span>
+                    <span style='background-color:#064E3B; color:#6EE7B7; padding:2px 8px; border-radius:4px; margin-right:8px;'>🟢 Authentic Signal Keyword</span>
+                    <span style='color:#9CA3AF;'>⚪ Neutral Word</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            # Highlight Box
+            explained_html_str = result.get("explained_html", analyzer.explain_review_words(review_text) if hasattr(analyzer, "explain_review_words") else review_text)
+            st.markdown(
+                f'<div class="xai-box">{explained_html_str}</div>',
+                unsafe_allow_html=True,
+            )
+
+        st.divider()
+
+        # Dual Sentiment & Stylometric Breakdown
         if analyze_btn or review_text:
             st.subheader("🤖 Dual-Engine Sentiment & Stylometric Breakdown")
             f = result["features"]
@@ -174,7 +212,6 @@ def main():
 
                 col_map1, col_map2, col_map3 = st.columns(3)
                 with col_map1:
-                    # Smart column auto-detection
                     text_default_idx = 0
                     for idx, c in enumerate(raw_df.columns):
                         if c.lower() in ["review_text", "text", "text_", "review", "content"]:
@@ -214,7 +251,6 @@ def main():
                     status_text.success("Batch analysis complete! 🎉")
                     st.divider()
 
-                    # Summary Metric Cards
                     total_scanned = len(results_df)
                     deceptive_count = (results_df["Classification"] == "DECEPTIVE").sum()
                     genuine_count = total_scanned - deceptive_count
@@ -228,7 +264,6 @@ def main():
 
                     st.divider()
 
-                    # Filter Options & Results Table
                     st.subheader("Detailed Scan Results Table")
                     filter_option = st.radio("Filter Table View", ["All Reviews", "Deceptive Only ⚠️", "Genuine Only ✅"], horizontal=True)
 
@@ -241,7 +276,6 @@ def main():
 
                     st.dataframe(display_df, use_container_width=True)
 
-                    # Export Download Button
                     csv_data = results_df.to_csv(index=False).encode("utf-8")
                     st.download_button(
                         label="📥 Download Processed CSV Results",
@@ -271,7 +305,7 @@ def main():
             st.dataframe(models_df.style.highlight_max(axis=0, color="#10B981"), use_container_width=True)
 
             st.divider()
-            st.subheader("Random Forest Feature Importances (Stylometric + VADER + RoBERTa)")
+            st.subheader("Hybrid Feature Importances & Word Coefficients")
             fig_path = MODELS_DIR / "feature_importance.png"
             if fig_path.exists():
                 st.image(str(fig_path), use_container_width=True)
