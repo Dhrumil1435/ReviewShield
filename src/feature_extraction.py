@@ -1,26 +1,38 @@
 """
 feature_extraction.py
-Extracts stylometric + sentiment features from cleaned reviews stored in
+Extracts stylometric + VADER + RoBERTa sentiment features from cleaned reviews stored in
 PostgreSQL (raw_reviews) and pushes them into engineered_features idempotently.
 
 Features extracted per review:
-- punctuation_freq       : punctuation marks per 100 characters
-- vocab_diversity        : type-token ratio (unique words / total words)
-- readability_score      : Flesch Reading Ease score (via textstat)
-- avg_sentence_length    : average words per sentence
-- sentiment_score        : VADER compound sentiment score (-1 to 1)
-- rating_sentiment_gap   : mismatch between star rating and text sentiment
+- punctuation_freq          : punctuation marks per 100 characters
+- vocab_diversity           : type-token ratio (unique words / total words)
+- readability_score         : Flesch Reading Ease score (via textstat)
+- avg_sentence_length       : average words per sentence
+- sentiment_score           : VADER compound sentiment score (-1 to 1)
+- rating_sentiment_gap      : VADER rating-sentiment gap
+- roberta_sentiment         : RoBERTa contextual sentiment score (-1 to 1)
+- roberta_rating_sentiment_gap : RoBERTa rating-sentiment gap
+- vader_roberta_dissonance  : absolute difference between VADER and RoBERTa sentiment
 """
 
 import re
+import sys
 import string
 import pandas as pd
 import textstat
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from sqlalchemy import text
 from src.config import get_db_engine
+from src.roberta_engine import RobertaSentimentEngine
 
-analyzer = SentimentIntensityAnalyzer()
+vader_analyzer = SentimentIntensityAnalyzer()
+roberta_engine = RobertaSentimentEngine()
 
 
 def punctuation_frequency(text_: str) -> float:
@@ -51,7 +63,7 @@ def avg_sentence_length(text_: str) -> float:
 
 def normalize_rating_to_sentiment_scale(rating: float) -> float:
     """
-    Maps a 1-5 star rating onto the same -1 to 1 scale as VADER's
+    Maps a 1-5 star rating onto the same -1 to 1 scale as VADER/RoBERTa
     compound sentiment score.
     """
     return round(((rating - 1) / 4) * 2 - 1, 4)
@@ -59,9 +71,19 @@ def normalize_rating_to_sentiment_scale(rating: float) -> float:
 
 def extract_features(row) -> dict:
     text_ = str(row["review_text"])
-    sentiment = analyzer.polarity_scores(text_)["compound"]
+
+    # VADER Sentiment
+    vader_sent = vader_analyzer.polarity_scores(text_)["compound"]
     expected_sentiment = normalize_rating_to_sentiment_scale(float(row["rating"]))
-    gap = round(abs(sentiment - expected_sentiment), 4)
+    vader_gap = round(abs(vader_sent - expected_sentiment), 4)
+
+    # RoBERTa Deep Learning Contextual Sentiment
+    roberta_res = roberta_engine.analyze_text(text_)
+    roberta_sent = roberta_res["roberta_compound"]
+    roberta_gap = round(abs(roberta_sent - expected_sentiment), 4)
+
+    # VADER vs RoBERTa Dissonance Score
+    dissonance = round(abs(vader_sent - roberta_sent), 4)
 
     return {
         "review_id": int(row["review_id"]),
@@ -69,50 +91,57 @@ def extract_features(row) -> dict:
         "vocab_diversity": vocab_diversity(text_),
         "readability_score": round(float(textstat.flesch_reading_ease(text_)), 4),
         "avg_sentence_length": avg_sentence_length(text_),
-        "sentiment_score": round(sentiment, 4),
-        "rating_sentiment_gap": gap,
+        "sentiment_score": round(vader_sent, 4),
+        "rating_sentiment_gap": vader_gap,
+        "roberta_sentiment": round(roberta_sent, 4),
+        "roberta_rating_sentiment_gap": roberta_gap,
+        "vader_roberta_dissonance": dissonance,
     }
 
 
-def run_feature_extraction(batch_size: int = 5000):
+def run_feature_extraction(batch_size: int = 2000):
     engine = get_db_engine()
 
-    # Find unextracted review IDs (Idempotent execution)
     query_unprocessed = """
         SELECT r.review_id, r.rating, r.review_text 
         FROM raw_reviews r
         LEFT JOIN engineered_features f ON r.review_id = f.review_id
-        WHERE f.review_id IS NULL
+        WHERE f.review_id IS NULL OR f.roberta_sentiment IS NULL
     """
     df = pd.read_sql(query_unprocessed, engine)
     total_unprocessed = len(df)
 
     if total_unprocessed == 0:
-        print("All reviews in raw_reviews already have extracted features in engineered_features.")
+        print("All reviews in raw_reviews already have extracted VADER + RoBERTa features.")
         return
 
-    print(f"Extracting features for {total_unprocessed} remaining reviews...")
+    print(f"Extracting VADER + RoBERTa features for {total_unprocessed} remaining reviews...")
 
-    # Process in batches
     for i in range(0, total_unprocessed, batch_size):
         batch_df = df.iloc[i : i + batch_size]
         features = [extract_features(row) for _, row in batch_df.iterrows()]
-        features_df = pd.DataFrame(features)
 
-        features_df.to_sql("engineered_features", engine, if_exists="append", index=False)
-        print(f"Pushed batch {i // batch_size + 1} ({len(features_df)} rows) to engineered_features.")
+        with engine.begin() as conn:
+            for feat in features:
+                conn.execute(
+                    text("""
+                        INSERT INTO engineered_features 
+                        (review_id, punctuation_freq, vocab_diversity, readability_score, 
+                         avg_sentence_length, sentiment_score, rating_sentiment_gap, 
+                         roberta_sentiment, roberta_rating_sentiment_gap, vader_roberta_dissonance)
+                        VALUES (:review_id, :punctuation_freq, :vocab_diversity, :readability_score,
+                                :avg_sentence_length, :sentiment_score, :rating_sentiment_gap,
+                                :roberta_sentiment, :roberta_rating_sentiment_gap, :vader_roberta_dissonance)
+                        ON CONFLICT (review_id) DO UPDATE SET
+                            roberta_sentiment = EXCLUDED.roberta_sentiment,
+                            roberta_rating_sentiment_gap = EXCLUDED.roberta_rating_sentiment_gap,
+                            vader_roberta_dissonance = EXCLUDED.vader_roberta_dissonance;
+                    """),
+                    feat,
+                )
+        print(f"Pushed batch {i // batch_size + 1} ({len(batch_df)} rows) into engineered_features.")
 
-    # Log completion in system_logs
-    with engine.begin() as conn:
-        conn.execute(
-            text("INSERT INTO system_logs (stage, message) VALUES (:stage, :msg)"),
-            {
-                "stage": "feature_extraction",
-                "msg": f"Successfully extracted features for {total_unprocessed} reviews.",
-            },
-        )
-
-    print(f"Feature extraction pipeline complete. Extracted {total_unprocessed} reviews.")
+    print(f"RoBERTa + VADER feature extraction pipeline complete.")
 
 
 if __name__ == "__main__":

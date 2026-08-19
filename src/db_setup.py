@@ -1,6 +1,7 @@
 """
 db_setup.py
 Initializes the ReviewShield PostgreSQL database tables and seeds raw reviews idempotently.
+Supports schema migrations for RoBERTa + VADER features.
 """
 
 import pandas as pd
@@ -26,6 +27,9 @@ CREATE TABLE IF NOT EXISTS engineered_features (
     avg_sentence_length FLOAT,
     sentiment_score FLOAT,
     rating_sentiment_gap FLOAT,
+    roberta_sentiment FLOAT,
+    roberta_rating_sentiment_gap FLOAT,
+    vader_roberta_dissonance FLOAT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT unique_review_feature UNIQUE (review_id)
 );
@@ -38,16 +42,23 @@ CREATE TABLE IF NOT EXISTS system_logs (
 );
 """
 
+MIGRATION_SQL = """
+ALTER TABLE engineered_features ADD COLUMN IF NOT EXISTS roberta_sentiment FLOAT;
+ALTER TABLE engineered_features ADD COLUMN IF NOT EXISTS roberta_rating_sentiment_gap FLOAT;
+ALTER TABLE engineered_features ADD COLUMN IF NOT EXISTS vader_roberta_dissonance FLOAT;
+"""
+
 
 def init_db():
     engine = get_db_engine()
     with engine.begin() as conn:
         conn.execute(text(CREATE_TABLES_SQL))
+        conn.execute(text(MIGRATION_SQL))
         conn.execute(
             text("INSERT INTO system_logs (stage, message) VALUES (:stage, :msg)"),
-            {"stage": "db_setup", "msg": "Database schemas initialized successfully."},
+            {"stage": "db_setup", "msg": "Database schemas & RoBERTa column migration verified successfully."},
         )
-    print("Database schemas created / verified successfully.")
+    print("Database schemas & RoBERTa column migrations updated successfully.")
 
 
 def seed_raw_reviews():
@@ -59,7 +70,6 @@ def seed_raw_reviews():
             print(f"raw_reviews table already populated ({count} records). Skipping seed.")
             return
 
-    # Check for cleaned data path or raw data path
     data_path = CLEANED_DATA_PATH if CLEANED_DATA_PATH.exists() else RAW_DATA_PATH
     if not data_path.exists():
         print(f"Data file not found at {data_path}. Skipping seed.")
@@ -68,7 +78,6 @@ def seed_raw_reviews():
     print(f"Seeding raw_reviews from {data_path}...")
     df = pd.read_csv(data_path)
 
-    # Standardize columns
     column_mapping = {
         "category": "category",
         "rating": "rating",
@@ -78,7 +87,6 @@ def seed_raw_reviews():
     }
     df = df.rename(columns={k: v for k, v in column_mapping.items() if k in df.columns})
 
-    # Keep necessary columns
     expected_cols = ["category", "rating", "label", "review_text"]
     df = df[[col for col in expected_cols if col in df.columns]]
 

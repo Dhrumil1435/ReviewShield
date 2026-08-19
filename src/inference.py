@@ -1,7 +1,7 @@
 """
 inference.py
 Production Inference Engine for ReviewShield.
-Loads the trained ML pipeline and evaluates arbitrary review text + star ratings in real-time.
+Loads the trained ML pipeline (Stylometric + VADER + RoBERTa) and evaluates arbitrary review text + star ratings in real-time or batch CSV data.
 """
 
 import sys
@@ -12,14 +12,15 @@ if str(BASE_DIR) not in sys.path:
 
 import joblib
 import pandas as pd
-from typing import Dict, Any
+from typing import Dict, Any, List
 from src.config import MODELS_DIR
 from src.feature_extraction import (
     punctuation_frequency,
     vocab_diversity,
     avg_sentence_length,
     normalize_rating_to_sentiment_scale,
-    analyzer,
+    vader_analyzer,
+    roberta_engine,
 )
 import textstat
 
@@ -46,37 +47,50 @@ class ReviewAnalyzer:
 
     def extract_single_features(self, review_text: str, rating: float) -> Dict[str, float]:
         text_ = str(review_text)
-        sentiment = analyzer.polarity_scores(text_)["compound"]
+        
+        # VADER Sentiment
+        vader_sent = vader_analyzer.polarity_scores(text_)["compound"]
         expected_sentiment = normalize_rating_to_sentiment_scale(float(rating))
-        gap = round(abs(sentiment - expected_sentiment), 4)
+        vader_gap = round(abs(vader_sent - expected_sentiment), 4)
+
+        # RoBERTa Contextual Sentiment
+        roberta_res = roberta_engine.analyze_text(text_)
+        roberta_sent = roberta_res["roberta_compound"]
+        roberta_gap = round(abs(roberta_sent - expected_sentiment), 4)
+
+        # VADER vs RoBERTa Dissonance
+        dissonance = round(abs(vader_sent - roberta_sent), 4)
 
         return {
             "punctuation_freq": punctuation_frequency(text_),
             "vocab_diversity": vocab_diversity(text_),
             "readability_score": round(float(textstat.flesch_reading_ease(text_)), 4),
             "avg_sentence_length": avg_sentence_length(text_),
-            "sentiment_score": round(sentiment, 4),
-            "rating_sentiment_gap": gap,
+            "sentiment_score": round(vader_sent, 4),
+            "rating_sentiment_gap": vader_gap,
+            "roberta_sentiment": round(roberta_sent, 4),
+            "roberta_rating_sentiment_gap": roberta_gap,
+            "vader_roberta_dissonance": dissonance,
         }
 
     def analyze(self, review_text: str, rating: float) -> Dict[str, Any]:
         features = self.extract_single_features(review_text, rating)
         features_df = pd.DataFrame([features])[self.feature_names]
 
-        # Predict probability of class 1 (Deceptive / CG)
         deceptive_prob = float(self.pipeline.predict_proba(features_df)[0, 1])
         is_deceptive = deceptive_prob >= 0.50
 
-        # Identify key risk factors
         risk_factors = []
+        if features["vader_roberta_dissonance"] > 0.65:
+            risk_factors.append(f"High VADER-RoBERTa Dissonance ({features['vader_roberta_dissonance']:.2f})")
+        if features["roberta_rating_sentiment_gap"] > 1.0:
+            risk_factors.append(f"High RoBERTa Sentiment Mismatch (Gap: {features['roberta_rating_sentiment_gap']:.2f})")
         if features["rating_sentiment_gap"] > 1.0:
-            risk_factors.append(f"High Sentiment-Rating Mismatch (Gap: {features['rating_sentiment_gap']})")
+            risk_factors.append(f"High VADER Sentiment Mismatch (Gap: {features['rating_sentiment_gap']:.2f})")
         if features["punctuation_freq"] > 6.0:
-            risk_factors.append(f"Elevated Punctuation Density ({features['punctuation_freq']} per 100 chars)")
+            risk_factors.append(f"Elevated Punctuation Density ({features['punctuation_freq']:.2f}/100 chars)")
         if features["vocab_diversity"] < 0.40:
-            risk_factors.append(f"Low Vocabulary Diversity ({features['vocab_diversity']} TTR)")
-        if features["avg_sentence_length"] > 35.0:
-            risk_factors.append(f"Unusually Long Sentences ({features['avg_sentence_length']} words/sent)")
+            risk_factors.append(f"Low Vocabulary Diversity ({features['vocab_diversity']:.2f} TTR)")
 
         return {
             "review_text": review_text,
@@ -88,6 +102,36 @@ class ReviewAnalyzer:
             "features": features,
             "risk_factors": risk_factors,
         }
+
+    def analyze_dataframe(self, df: pd.DataFrame, text_col: str, rating_col: str, progress_callback=None) -> pd.DataFrame:
+        """
+        Batch processes a pandas DataFrame containing review text and star ratings.
+        Returns the original DataFrame enriched with deceptive risk metrics and classifications.
+        """
+        results = []
+        total_rows = len(df)
+
+        for idx, (_, row) in enumerate(df.iterrows()):
+            review_text = row[text_col]
+            rating = row[rating_col]
+            analysis = self.analyze(review_text, rating)
+
+            results.append({
+                "Deceptive Probability (%)": analysis["deceptive_percentage"],
+                "Classification": "DECEPTIVE" if analysis["is_deceptive"] else "GENUINE",
+                "Risk Factors": ", ".join(analysis["risk_factors"]) if analysis["risk_factors"] else "None",
+                "VADER Sentiment": analysis["features"]["sentiment_score"],
+                "RoBERTa Sentiment": analysis["features"]["roberta_sentiment"],
+                "VADER-RoBERTa Dissonance": analysis["features"]["vader_roberta_dissonance"],
+                "Vocab Diversity (TTR)": analysis["features"]["vocab_diversity"],
+                "Readability Score": analysis["features"]["readability_score"],
+            })
+
+            if progress_callback:
+                progress_callback((idx + 1) / total_rows)
+
+        results_df = pd.DataFrame(results)
+        return pd.concat([df.reset_index(drop=True), results_df], axis=1)
 
 
 if __name__ == "__main__":

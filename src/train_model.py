@@ -1,6 +1,7 @@
 """
 train_model.py
 Trains, evaluates, and serializes machine learning models for ReviewShield deceptive review detection.
+Incorporates Stylometric + VADER + RoBERTa Transformer features.
 Models evaluated: Logistic Regression, Random Forest, HistGradientBoosting.
 Saves the best performing pipeline to models/best_model_pipeline.joblib.
 """
@@ -39,6 +40,9 @@ FEATURE_COLS = [
     "avg_sentence_length",
     "sentiment_score",
     "rating_sentiment_gap",
+    "roberta_sentiment",
+    "roberta_rating_sentiment_gap",
+    "vader_roberta_dissonance",
 ]
 
 
@@ -46,7 +50,10 @@ def load_dataset():
     engine = get_db_engine()
     query = """
         SELECT f.review_id, r.label, f.punctuation_freq, f.vocab_diversity, 
-               f.readability_score, f.avg_sentence_length, f.sentiment_score, f.rating_sentiment_gap
+               f.readability_score, f.avg_sentence_length, f.sentiment_score, f.rating_sentiment_gap,
+               COALESCE(f.roberta_sentiment, 0.0) as roberta_sentiment,
+               COALESCE(f.roberta_rating_sentiment_gap, 0.0) as roberta_rating_sentiment_gap,
+               COALESCE(f.vader_roberta_dissonance, 0.0) as vader_roberta_dissonance
         FROM engineered_features f
         JOIN raw_reviews r ON f.review_id = r.review_id
     """
@@ -77,11 +84,11 @@ def train_and_evaluate():
         ]),
         "RandomForest": Pipeline([
             ("scaler", StandardScaler()),
-            ("classifier", RandomForestClassifier(n_estimators=30, max_depth=12, random_state=42, n_jobs=2)),
+            ("classifier", RandomForestClassifier(n_estimators=50, max_depth=12, random_state=42, n_jobs=2)),
         ]),
         "HistGradientBoosting": Pipeline([
             ("scaler", StandardScaler()),
-            ("classifier", HistGradientBoostingClassifier(max_iter=50, random_state=42)),
+            ("classifier", HistGradientBoostingClassifier(max_iter=100, random_state=42)),
         ]),
     }
 
@@ -91,7 +98,7 @@ def train_and_evaluate():
     best_pipeline = None
 
     print("\n" + "=" * 50)
-    print("STARTING MODEL BENCHMARKING")
+    print("STARTING MODEL BENCHMARKING (WITH ROBERTA FEATURES)")
     print("=" * 50)
 
     for name, pipeline in models.items():
@@ -133,7 +140,6 @@ def train_and_evaluate():
     print(f"BEST MODEL: {best_model_name} (ROC-AUC: {best_roc_auc:.4f})")
     print("=" * 50)
 
-    # Save Best Model Pipeline
     pipeline_path = MODELS_DIR / "best_model_pipeline.joblib"
     joblib.dump({
         "pipeline": best_pipeline,
@@ -143,19 +149,17 @@ def train_and_evaluate():
     }, pipeline_path)
     print(f"Saved best model pipeline to {pipeline_path}")
 
-    # Save Metrics Report JSON
     metrics_path = MODELS_DIR / "metrics_report.json"
     with open(metrics_path, "w") as f:
         json.dump(results, f, indent=4)
     print(f"Saved model metrics report to {metrics_path}")
 
-    # Feature Importance Plot
     if "RandomForest" in models:
         rf_model = models["RandomForest"].named_steps["classifier"]
         importances = rf_model.feature_importances_
-        plt.figure(figsize=(8, 5))
+        plt.figure(figsize=(9, 6))
         plt.barh(FEATURE_COLS, importances, color="#4F46E5")
-        plt.title("Random Forest Feature Importances")
+        plt.title("Random Forest Feature Importances (Stylometric + VADER + RoBERTa)")
         plt.xlabel("Importance Score")
         plt.tight_layout()
         plt.savefig(MODELS_DIR / "feature_importance.png")
