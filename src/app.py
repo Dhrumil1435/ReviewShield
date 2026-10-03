@@ -13,11 +13,19 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 import json
+from datetime import datetime
 import pandas as pd
 import streamlit as st
-from sqlalchemy import text
-from src.config import MODELS_DIR, get_db_engine
-from src.inference import ReviewAnalyzer
+from sqlalchemy import inspect, text
+from src.config import (
+    DB_BACKEND,
+    DB_HOST,
+    DB_NAME,
+    DB_PATH,
+    DB_PORT,
+    MODELS_DIR,
+    get_db_engine,
+)
 
 # Page Configuration
 st.set_page_config(
@@ -27,46 +35,93 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Custom Styling (Dark Mode / Glassmorphism Aesthetic)
+# Dashboard styling
 st.markdown("""
     <style>
+    .stApp {
+        background: #F3F5F1;
+        color: #1C302B;
+    }
+    [data-testid="stHeader"] {
+        background: transparent;
+    }
+    [data-testid="stSidebar"] {
+        background: #173D35;
+        border-right: 1px solid #28564C;
+    }
+    [data-testid="stSidebar"] * {
+        color: #EDF4EF;
+    }
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h1 {
+        color: #FFFFFF;
+    }
+    .block-container {
+        max-width: 1440px;
+        padding-top: 2.2rem;
+        padding-bottom: 3rem;
+    }
     .main-header {
-        font-size: 2.5rem;
+        font-size: 2.4rem;
         font-weight: 700;
-        background: linear-gradient(90deg, #4F46E5 0%, #06B6D4 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
+        color: #173D35;
         margin-bottom: 0.5rem;
     }
     .sub-header {
         font-size: 1.1rem;
-        color: #9CA3AF;
+        color: #587067;
         margin-bottom: 2rem;
     }
     .badge-deceptive {
-        background-color: #EF4444;
+        background-color: #B84132;
         color: white;
-        padding: 6px 16px;
-        border-radius: 20px;
+        padding: 7px 12px;
+        border-radius: 4px;
         font-weight: 600;
         font-size: 1rem;
     }
     .badge-genuine {
-        background-color: #10B981;
+        background-color: #24745A;
         color: white;
-        padding: 6px 16px;
-        border-radius: 20px;
+        padding: 7px 12px;
+        border-radius: 4px;
         font-weight: 600;
         font-size: 1rem;
     }
     .xai-box {
-        background-color: #0F172A;
-        border: 1px solid #334155;
-        border-radius: 10px;
-        padding: 16px;
+        background-color: #FFFFFF;
+        border: 1px solid #D7E0D9;
+        border-radius: 6px;
+        padding: 18px;
         font-size: 1.05rem;
         line-height: 1.8;
-        color: #E2E8F0;
+        color: #263B34;
+    }
+    [data-testid="stMetric"] {
+        background: #FFFFFF;
+        border: 1px solid #DCE4DD;
+        border-radius: 6px;
+        padding: 12px 14px;
+    }
+    .stButton button[kind="primary"] {
+        background: #B84132;
+        border: 1px solid #B84132;
+        color: #FFFFFF;
+    }
+    .stButton button[kind="primary"]:hover {
+        background: #963629;
+        border-color: #963629;
+        color: #FFFFFF;
+    }
+    @media (max-width: 768px) {
+        .block-container {
+            padding: 1.25rem 1rem 2rem;
+        }
+        .main-header {
+            font-size: 1.85rem;
+        }
+        .sub-header {
+            font-size: 1rem;
+        }
     }
     </style>
 """, unsafe_allow_html=True)
@@ -74,7 +129,72 @@ st.markdown("""
 
 @st.cache_resource
 def get_analyzer():
+    from src.inference import ReviewAnalyzer
+
     return ReviewAnalyzer()
+
+
+@st.cache_resource
+def get_database_engine():
+    return get_db_engine()
+
+
+@st.fragment(run_every=10)
+def render_database_analytics():
+    st.subheader("ReviewShield Database Overview")
+    st.caption(f"Live snapshot · refreshed at {datetime.now().strftime('%H:%M:%S')} · updates every 10 seconds")
+
+    try:
+        engine = get_database_engine()
+        required_tables = {"raw_reviews", "engineered_features", "system_logs"}
+        if not required_tables.issubset(inspect(engine).get_table_names()):
+            from src.db_setup import init_db
+
+            init_db()
+
+        with engine.connect() as conn:
+            raw_count = conn.execute(text("SELECT COUNT(*) FROM raw_reviews")).scalar()
+            feature_count = conn.execute(text("SELECT COUNT(*) FROM engineered_features")).scalar()
+            log_count = conn.execute(text("SELECT COUNT(*) FROM system_logs")).scalar()
+
+        dc1, dc2, dc3 = st.columns(3)
+        dc1.metric("Ingested Raw Reviews", f"{raw_count:,}")
+        dc2.metric("Engineered Feature Vectors", f"{feature_count:,}")
+        dc3.metric("System Log Events", f"{log_count:,}")
+
+        st.divider()
+        st.subheader("System Execution Log History")
+        logs_df = pd.read_sql(
+            "SELECT log_id, stage, message, logged_at FROM system_logs ORDER BY logged_at DESC LIMIT 10",
+            engine,
+        )
+        st.dataframe(logs_df, width="stretch")
+
+    except Exception as e:
+        database_target = (
+            str(DB_PATH)
+            if DB_BACKEND == "sqlite"
+            else f"{DB_HOST}:{DB_PORT}/{DB_NAME}"
+        )
+        st.error(
+            f"Database analytics could not open {DB_BACKEND} database "
+            f"{database_target}."
+        )
+        if DB_BACKEND == "postgresql":
+            st.markdown("#### Restore the database connection")
+            st.markdown(
+                "1. Start your PostgreSQL service or Docker container.\n"
+                "2. Set `DB_BACKEND=postgresql` and your credentials in the project `.env`.\n"
+                "3. Create the database if needed: `createdb -U postgres reviewshield`.\n"
+                "4. Run `python -m src.db_setup`, then refresh this page."
+            )
+        else:
+            st.markdown(
+                f"The local SQLite database is created automatically. Check that the project "
+                f"data folder is writable and that `{DB_PATH}` is available."
+            )
+        with st.expander("Connection details"):
+            st.code(str(e))
 
 
 def main():
@@ -84,78 +204,85 @@ def main():
         unsafe_allow_html=True,
     )
 
-    try:
-        analyzer = get_analyzer()
-    except Exception as e:
-        st.error(f"Error loading model pipeline: {e}")
-        st.info("Please make sure `src/train_model.py` has been executed to generate the model artifacts.")
-        return
-
-    st.sidebar.title("Navigation")
+    st.sidebar.title("ReviewShield")
     page = st.sidebar.radio(
-        "Go to",
+        "Workspace",
         [
             "🔍 Single Review Scanner",
             "📂 Batch CSV Scanner",
             "📊 Model Insights & Benchmarks",
             "🗄️ Database Analytics",
         ],
+        key="reviewshield_navigation",
     )
 
     # PAGE 1: Single Review Scanner
     if page == "🔍 Single Review Scanner":
-        st.subheader("Analyze Review Authenticity & Word-Level Attributions")
-        st.write("Input a product review and star rating to calculate deceptive probability using hybrid TF-IDF + VADER + RoBERTa scores.")
+        st.subheader("Interactive Single Review Deception Scanner")
+        st.write("Enter any product or hotel review below along with its star rating to analyze authenticity.")
 
-        col1, col2 = st.columns([3, 2])
+        sample_reviews = {
+            "Custom Input": "",
+            "Deceptive Review Sample (Suspiciously Positive)": "This is hands down the most incredible product ever created! Absolutely flawless perfection in every single detail, changed my life forever within seconds. Best purchase of my entire lifetime, everyone MUST buy this right now!",
+            "Genuine Review Sample (Balanced Feedback)": "The build quality is good and the screen is clear, but battery life is average. Takes about 2 hours to fully charge. Overall decent value for the price.",
+        }
 
-        with col1:
-            default_review = (
-                "ABSOLUTELY PERFECT ITEM!!!!!! Best quality I have ever seen on Amazon! "
-                "Super fast 1-day delivery, 100% recommended to everyone!!!"
-            )
+        sample_choice = st.selectbox("Select Sample Input (Optional):", list(sample_reviews.keys()))
+        default_text = sample_reviews[sample_choice]
+
+        with st.form("single_review_form"):
             review_text = st.text_area(
-                "Review Text",
-                value=default_review,
-                height=160,
-                placeholder="Enter review text here...",
+                "Review Text Content",
+                value=default_text,
+                height=140,
+                placeholder="Paste review text here...",
             )
-            rating = st.slider("Star Rating Given", min_value=1.0, max_value=5.0, value=5.0, step=0.5)
-            analyze_btn = st.button("Run Deception Scanner 🚀", type="primary", use_container_width=True)
 
-        with col2:
-            if analyze_btn or review_text:
+            col1, col2 = st.columns([1, 2])
+            with col1:
+                rating = st.slider("Star Rating Given", min_value=1.0, max_value=5.0, value=5.0, step=0.5)
+
+            submit_btn = st.form_submit_button("Analyze Review Authenticity 🚀", type="primary")
+
+        analyzer = get_analyzer()
+        has_result = False
+        result = None
+
+        if submit_btn and review_text.strip():
+            with st.spinner("Analyzing text with RoBERTa & VADER feature pipelines..."):
                 result = analyzer.analyze(review_text, rating)
+                has_result = True
+        elif default_text and not submit_btn:
+            result = analyzer.analyze(default_text, rating)
+            has_result = True
 
-                st.markdown("### Detection Result")
-                prob = result["deceptive_percentage"]
+        if has_result:
+            st.divider()
+            res_col1, res_col2, res_col3 = st.columns([1.5, 1, 1])
 
+            with res_col1:
                 if result["is_deceptive"]:
-                    st.markdown(
-                        f'<span class="badge-deceptive">⚠️ DECEPTIVE / COMPUTER-GENERATED ({prob}%)</span>',
-                        unsafe_allow_html=True,
-                    )
+                    st.markdown('<span class="badge-deceptive">⚠️ FLAG: DECEPTIVE REVIEW DETECTED</span>', unsafe_allow_html=True)
                 else:
-                    st.markdown(
-                        f'<span class="badge-genuine">✅ ORIGINAL / AUTHENTIC ({(100 - prob):.1f}% Genuine)</span>',
-                        unsafe_allow_html=True,
-                    )
+                    st.markdown('<span class="badge-genuine">✅ VERIFIED: GENUINE REVIEW</span>', unsafe_allow_html=True)
 
                 st.write("")
-                st.progress(result["deceptive_probability"])
-                st.caption(f"Deceptive Probability Score: **{prob:.2f}%**")
+                st.markdown(f"**Classification Summary:** `{result['classification']}`")
 
-                if result["risk_factors"]:
-                    st.markdown("#### 🚨 Risk Indicator Flags")
-                    for flag in result["risk_factors"]:
-                        st.warning(flag)
-                else:
-                    st.success("No abnormal stylometric or sentiment dissonance risk flags detected.")
+            with res_col2:
+                st.metric("Deceptive Probability", f"{result['deceptive_percentage']:.1f}%")
+
+            with res_col3:
+                st.metric("Authenticity Confidence", f"{100.0 - result['deceptive_percentage']:.1f}%")
+
+            if result["risk_factors"]:
+                st.write("")
+                st.warning("⚠️ **Detected Risk Signals:**\n" + "\n".join([f"- {rf}" for rf in result["risk_factors"]]))
 
         st.divider()
 
         # EXPLAINABLE AI (XAI) WORD ATTRIBUTION SECTION
-        if analyze_btn or review_text:
+        if has_result:
             st.subheader("🧠 Explainable AI (XAI) — Word-Level Attribution Scanner")
             st.write("Visual breakdown showing exact word contributions to the deception score based on model weights.")
 
@@ -182,7 +309,7 @@ def main():
         st.divider()
 
         # Dual Sentiment & Stylometric Breakdown
-        if analyze_btn or review_text:
+        if has_result:
             st.subheader("🤖 Dual-Engine Sentiment & Stylometric Breakdown")
             f = result["features"]
 
@@ -208,6 +335,10 @@ def main():
         if uploaded_file is not None:
             try:
                 raw_df = pd.read_csv(uploaded_file)
+                if raw_df.empty:
+                    st.warning("The uploaded CSV has no review rows to scan.")
+                    st.stop()
+
                 st.success(f"Successfully loaded CSV with **{len(raw_df):,}** rows and columns: `{list(raw_df.columns)}`")
 
                 col_map1, col_map2, col_map3 = st.columns(3)
@@ -228,9 +359,9 @@ def main():
                     rating_col = st.selectbox("Select Star Rating Column", list(raw_df.columns), index=rating_default_idx)
 
                 with col_map3:
-                    max_rows = st.number_input("Max Rows to Process", min_value=5, max_value=min(len(raw_df), 10000), value=min(len(raw_df), 200), step=50)
+                    max_rows = st.number_input("Max Rows to Process", min_value=1, max_value=min(len(raw_df), 10000), value=min(len(raw_df), 200), step=50)
 
-                run_batch_btn = st.button("Run Batch Deception Scanner 🚀", type="primary", use_container_width=True)
+                run_batch_btn = st.button("Run Batch Deception Scanner 🚀", type="primary", width="stretch")
 
                 if run_batch_btn:
                     process_df = raw_df.head(max_rows).copy()
@@ -241,7 +372,7 @@ def main():
                         progress_bar.progress(pct)
                         status_text.text(f"Processing batch reviews... {int(pct * 100)}% complete")
 
-                    results_df = analyzer.analyze_dataframe(
+                    results_df = get_analyzer().analyze_dataframe(
                         process_df,
                         text_col=text_col,
                         rating_col=rating_col,
@@ -274,7 +405,7 @@ def main():
                     else:
                         display_df = results_df
 
-                    st.dataframe(display_df, use_container_width=True)
+                    st.dataframe(display_df, width="stretch")
 
                     csv_data = results_df.to_csv(index=False).encode("utf-8")
                     st.download_button(
@@ -283,11 +414,11 @@ def main():
                         file_name="reviewshield_batch_analysis.csv",
                         mime="text/csv",
                         type="primary",
-                        use_container_width=True,
+                        width="stretch",
                     )
 
             except Exception as e:
-                st.error(f"Error reading CSV file: {e}")
+                st.error(f"Unable to process or analyze the uploaded CSV: {e}")
 
     # PAGE 3: Model Insights & Benchmarks
     elif page == "📊 Model Insights & Benchmarks":
@@ -302,42 +433,19 @@ def main():
             models_df = models_df[["accuracy", "precision", "recall", "f1_score", "roc_auc"]]
             models_df.columns = ["Accuracy", "Precision", "Recall", "F1-Score", "ROC-AUC"]
 
-            st.dataframe(models_df.style.highlight_max(axis=0, color="#10B981"), use_container_width=True)
+            st.dataframe(models_df.style.highlight_max(axis=0, color="#10B981"), width="stretch")
 
             st.divider()
             st.subheader("Hybrid Feature Importances & Word Coefficients")
             fig_path = MODELS_DIR / "feature_importance.png"
             if fig_path.exists():
-                st.image(str(fig_path), use_container_width=True)
+                st.image(str(fig_path), width="stretch")
         else:
             st.warning("Model metrics report not found. Run `src/train_model.py` to generate benchmarking charts.")
 
     # PAGE 4: Database Analytics
     elif page == "🗄️ Database Analytics":
-        st.subheader("PostgreSQL Data Warehouse Overview")
-
-        try:
-            engine = get_db_engine()
-            with engine.connect() as conn:
-                raw_count = conn.execute(text("SELECT COUNT(*) FROM raw_reviews")).scalar()
-                feature_count = conn.execute(text("SELECT COUNT(*) FROM engineered_features")).scalar()
-                log_count = conn.execute(text("SELECT COUNT(*) FROM system_logs")).scalar()
-
-            dc1, dc2, dc3 = st.columns(3)
-            dc1.metric("Ingested Raw Reviews", f"{raw_count:,}")
-            dc2.metric("Engineered Feature Vectors", f"{feature_count:,}")
-            dc3.metric("System Log Events", f"{log_count:,}")
-
-            st.divider()
-            st.subheader("System Execution Log History")
-            logs_df = pd.read_sql(
-                "SELECT log_id, stage, message, logged_at FROM system_logs ORDER BY logged_at DESC LIMIT 10",
-                engine,
-            )
-            st.dataframe(logs_df, use_container_width=True)
-
-        except Exception as e:
-            st.error(f"Could not connect to PostgreSQL database: (psycopg2.OperationalError) {e}")
+        render_database_analytics()
 
 
 if __name__ == "__main__":

@@ -1,14 +1,20 @@
 """
 db_setup.py
-Initializes the ReviewShield PostgreSQL database tables and seeds raw reviews idempotently.
+Initializes the ReviewShield SQLite or PostgreSQL database tables and seeds raw reviews idempotently.
 Supports schema migrations for RoBERTa + VADER features.
 """
 
+import sys
+from pathlib import Path
+BASE_DIR = Path(__file__).resolve().parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
 import pandas as pd
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from src.config import get_db_engine, CLEANED_DATA_PATH, RAW_DATA_PATH
 
-CREATE_TABLES_SQL = """
+POSTGRES_CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS raw_reviews (
     review_id SERIAL PRIMARY KEY,
     category VARCHAR(100),
@@ -42,6 +48,40 @@ CREATE TABLE IF NOT EXISTS system_logs (
 );
 """
 
+SQLITE_CREATE_TABLES_SQL = """
+CREATE TABLE IF NOT EXISTS raw_reviews (
+    review_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    category VARCHAR(100),
+    rating NUMERIC(2, 1),
+    label VARCHAR(10),
+    review_text TEXT,
+    ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS engineered_features (
+    feature_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    review_id INTEGER REFERENCES raw_reviews(review_id) ON DELETE CASCADE,
+    punctuation_freq FLOAT,
+    vocab_diversity FLOAT,
+    readability_score FLOAT,
+    avg_sentence_length FLOAT,
+    sentiment_score FLOAT,
+    rating_sentiment_gap FLOAT,
+    roberta_sentiment FLOAT,
+    roberta_rating_sentiment_gap FLOAT,
+    vader_roberta_dissonance FLOAT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT unique_review_feature UNIQUE (review_id)
+);
+
+CREATE TABLE IF NOT EXISTS system_logs (
+    log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage VARCHAR(100),
+    message TEXT,
+    logged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
 MIGRATION_SQL = """
 ALTER TABLE engineered_features ADD COLUMN IF NOT EXISTS roberta_sentiment FLOAT;
 ALTER TABLE engineered_features ADD COLUMN IF NOT EXISTS roberta_rating_sentiment_gap FLOAT;
@@ -52,8 +92,35 @@ ALTER TABLE engineered_features ADD COLUMN IF NOT EXISTS vader_roberta_dissonanc
 def init_db():
     engine = get_db_engine()
     with engine.begin() as conn:
-        conn.execute(text(CREATE_TABLES_SQL))
-        conn.execute(text(MIGRATION_SQL))
+        create_tables_sql = (
+            SQLITE_CREATE_TABLES_SQL
+            if engine.dialect.name == "sqlite"
+            else POSTGRES_CREATE_TABLES_SQL
+        )
+        for statement in create_tables_sql.split(";"):
+            if statement.strip():
+                conn.execute(text(statement))
+
+        if engine.dialect.name == "sqlite":
+            feature_columns = {
+                column["name"]
+                for column in inspect(conn).get_columns("engineered_features")
+            }
+            for column_name in (
+                "roberta_sentiment",
+                "roberta_rating_sentiment_gap",
+                "vader_roberta_dissonance",
+            ):
+                if column_name not in feature_columns:
+                    conn.execute(
+                        text(
+                            "ALTER TABLE engineered_features "
+                            f"ADD COLUMN {column_name} FLOAT"
+                        )
+                    )
+        else:
+            conn.execute(text(MIGRATION_SQL))
+
         conn.execute(
             text("INSERT INTO system_logs (stage, message) VALUES (:stage, :msg)"),
             {"stage": "db_setup", "msg": "Database schemas & RoBERTa column migration verified successfully."},
