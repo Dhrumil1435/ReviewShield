@@ -26,6 +26,7 @@ from src.config import (
     MODELS_DIR,
     get_db_engine,
 )
+from src.visualizations import generate_wordclouds_from_weights, generate_stylometric_radar_chart
 
 # Page Configuration
 st.set_page_config(
@@ -325,6 +326,24 @@ def main():
             fc3.metric("Vocab Diversity (TTR)", f"{f['vocab_diversity']:.2f}")
             fc4.metric("Readability Score", f"{f['readability_score']:.1f}")
 
+            st.write("")
+            st.subheader("🕸️ Stylometric & Sentiment Radar Profile")
+            radar_col1, radar_col2 = st.columns([1.3, 1])
+            with radar_col1:
+                fig_radar = generate_stylometric_radar_chart(f)
+                st.pyplot(fig_radar, use_container_width=True)
+            with radar_col2:
+                st.markdown(
+                    """
+                    #### Radar Chart Insights
+                    - **Solid Green Polygon**: Normalized feature profile of the current review text.
+                    - **Dashed Gray Baseline**: Benchmark profile derived from authentic, genuine reviews.
+                    - **Key Deception Signals**:
+                      - Spikes in **VADER vs RoBERTa Dissonance** indicate superficial sentiment hype.
+                      - Spikes in **Sentiment Gap** signal severe mismatch between text emotion and star rating.
+                    """
+                )
+
     # PAGE 2: Batch CSV Scanner
     elif page == "📂 Batch CSV Scanner":
         st.subheader("Bulk Dataset Deception Scanner")
@@ -434,6 +453,19 @@ def main():
             models_df.columns = ["Accuracy", "Precision", "Recall", "F1-Score", "ROC-AUC"]
 
             st.dataframe(models_df.style.highlight_max(axis=0, color="#10B981"), width="stretch")
+
+            st.divider()
+            st.subheader("☁️ Deceptive vs. Authentic Keyword Clouds")
+            st.write("Visual frequency clouds generated from TF-IDF model feature weights.")
+
+            analyzer = get_analyzer()
+            if hasattr(analyzer, "word_coef_map") and analyzer.word_coef_map:
+                fig_dec, fig_auth = generate_wordclouds_from_weights(analyzer.word_coef_map)
+                wc_col1, wc_col2 = st.columns(2)
+                with wc_col1:
+                    st.pyplot(fig_dec, use_container_width=True)
+                with wc_col2:
+                    st.pyplot(fig_auth, use_container_width=True)
 
             st.divider()
             st.subheader("Hybrid Feature Importances & Word Coefficients")
