@@ -98,20 +98,41 @@ st.markdown("""
         color: #263B34;
     }
     [data-testid="stMetric"] {
-        background: #FFFFFF;
-        border: 1px solid #DCE4DD;
-        border-radius: 6px;
-        padding: 12px 14px;
+        background: #FFFFFF !important;
+        border: 1px solid #C8D6CB !important;
+        border-radius: 8px !important;
+        padding: 14px 16px !important;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.06) !important;
+    }
+    [data-testid="stMetricLabel"], [data-testid="stMetricLabel"] * {
+        color: #374151 !important;
+        font-weight: 600 !important;
+        font-size: 0.95rem !important;
+    }
+    [data-testid="stMetricValue"], [data-testid="stMetricValue"] * {
+        color: #0F172A !important;
+        font-weight: 800 !important;
+        font-size: 1.8rem !important;
+    }
+    [data-testid="stMetricDelta"] * {
+        font-weight: 700 !important;
+    }
+    code {
+        color: #065F46 !important;
+        background-color: #D1FAE5 !important;
+        padding: 2px 6px !important;
+        border-radius: 4px !important;
+        font-weight: 700 !important;
     }
     .stButton button[kind="primary"] {
-        background: #B84132;
-        border: 1px solid #B84132;
-        color: #FFFFFF;
+        background: #B84132 !important;
+        border: 1px solid #B84132 !important;
+        color: #FFFFFF !important;
     }
     .stButton button[kind="primary"]:hover {
-        background: #963629;
-        border-color: #963629;
-        color: #FFFFFF;
+        background: #963629 !important;
+        border-color: #963629 !important;
+        color: #FFFFFF !important;
     }
     @media (max-width: 768px) {
         .block-container {
